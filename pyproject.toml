@@ -23,6 +23,7 @@ python-dotenv = "^1.0.1"
 humanize = "^4.10.0"
 streamlit = "^1.38.0"
 nest-asyncio = "^1.6.0"
+scikit-learn = "^1.5.2"
 
 
 [build-system]
