@@ -1,9 +1,10 @@
-from project.src.GenTKG.learners import TemporalLogicRuleLearner
+from project.src.GenTKG.learners.interface import ILearner
 from project.src.GenTKG.retrievers.interface import IFactsRetriever
 from typing import List
 
 import pandas as pd
 from project.src.GenTKG.models import TKGFact, TKGQuery, TemporalLogicRule
+from project.src.GenTKG.vectorstore import IVectorstore
 
 
 # TODO - Very similar to the GenTKGFactsRetriever, consider refactoring.
@@ -27,19 +28,18 @@ class GenTKGZeroShotFactsRetriever(IFactsRetriever):
         self,
         w: int,
         N: int,
-        training_data: pd.DataFrame,
         retrieval_data: pd.DataFrame,
-        cache_path: str | None = None,
+        learner: ILearner,
+        vectorstore: IVectorstore | None = None,
     ) -> None:
         self.w = w  # Time window length, [h]
         self.N = N  # Max number of facts to retrieve
-        self.training_data = training_data  # Columns as List[QuadrupleDecoded] which the temporal rules will be learned from
         self.retrieval_data = retrieval_data  # Columns as List[QuadrupleDecoded] which the facts will be retrieved from
+        self.learner = learner  # Learner to learn and retreive the temporal logic rules
 
-        self.temporal_logic_rules: List[TemporalLogicRule] = (
-            self._create_temporal_logic_rules(cache_path=cache_path)
-        )
+        self.temporal_logic_rules = self.learner.get_rules()
         self.df_temporal_rules = self._temporal_rules_to_df(self.temporal_logic_rules)
+        self.vectorstore = vectorstore
 
     def retrieve_facts(self, query: TKGQuery, verbose: bool = False) -> List[TKGFact]:
         # Step 1: Extract facts within the time window
@@ -59,7 +59,9 @@ class GenTKGZeroShotFactsRetriever(IFactsRetriever):
         remaining_N = self.N - len(df_facts_rule_head)
 
         # Step 3: Retrieve relevant temporal rules based on the query
-        df_temporal_rules = self._get_relevant_temporal_rules(query)
+        df_temporal_rules = self._get_relevant_temporal_rules(
+            query_relation_id=query.relation_id
+        )
         if verbose:
             print(
                 f"Found {len(df_temporal_rules)} relevant temporal rules to the query."
@@ -69,6 +71,11 @@ class GenTKGZeroShotFactsRetriever(IFactsRetriever):
         # If so, we use the heuristics to map the query to rules we may seem fit.
         if len(df_temporal_rules) == 0:
             df_topk_temporal_rules = self._retrieve_topk_similar_temporal_rules(query)
+
+            if verbose:
+                print(
+                    f"Found {len(df_topk_temporal_rules)} top-k similar temporal rules."
+                )
 
             df_temporal_rules = pd.concat(
                 [df_temporal_rules, df_topk_temporal_rules], axis=0
@@ -93,31 +100,34 @@ class GenTKGZeroShotFactsRetriever(IFactsRetriever):
     ) -> pd.DataFrame:
         query_relation = query.relation
 
-        # 1. First, decode the df_temporal_rules to get the relation names
-        relation2id = self.training_data[["relation", "relation_id"]].drop_duplicates()
-        df_temporal_rules_decoded = (
-            self.df_temporal_rules.merge(
-                relation2id, left_on="relation_id_head", right_on="relation_id"
-            )
-            .drop(columns=["relation_id"])
-            .rename(columns={"relation": "relation_head"})
-            .merge(relation2id, left_on="relation_id_body", right_on="relation_id")
-            .drop(columns=["relation_id"])
-            .rename(columns={"relation": "relation_body"})
-        )
+        # 1. Get the top-k most similar relations to the query relation
+        topk_similar_relations = self.vectorstore.get_topk_similar(query_relation, k)
+        assert (
+            len(topk_similar_relations) == k
+        ), f"Expected {k} similar relations, but got {len(topk_similar_relations)}"
+        # print(f"Top-k similar relations to {query_relation}: {topk_similar_relations}")
 
-        # 2. Build a queryset of temporal_rules within the time window,
-        
+        # Remove the query relation from the list, if it exists
+        topk_similar_relations = [
+            relation
+            for relation in topk_similar_relations
+            if relation != query_relation
+        ]
 
-        """ 
-        # Get the most confident rule for each relation pair, per temporal_delta
-        df_temporal_rules_relevant = df_temporal_rules_queryset.loc[
-            df_temporal_rules_queryset.groupby(
-                ["relation_id_body", "relation_id_head"]
-            )["confidence"].idxmax()
-        ] 
-        """
-        return pd.DataFrame()
+        # 2. Retrieve the equivalent relation ids
+        relation2id = self.retrieval_data[["relation", "relation_id"]].drop_duplicates()
+        topk_similar_relations_ids = relation2id.query(
+            f"relation in @topk_similar_relations"
+        )["relation_id"].tolist()
+
+        # 3. Retrieve the temporal rules based on the similar relations
+        dfs_temporal_rules = [
+            self._get_relevant_temporal_rules(relation_id)
+            for relation_id in topk_similar_relations_ids
+        ]
+
+        df_temporal_rules_combined = pd.concat(dfs_temporal_rules, axis=0)
+        return df_temporal_rules_combined
 
     def _get_queryset_within_time_window(self, query: TKGQuery) -> pd.DataFrame:
         time_window_start = query.timestamp - self.w
@@ -137,10 +147,12 @@ class GenTKGZeroShotFactsRetriever(IFactsRetriever):
         )
         return df_facts_rule_head
 
-    def _get_relevant_temporal_rules(self, query: TKGQuery) -> pd.DataFrame:
+    def _get_relevant_temporal_rules(
+        self, query_relation_id: int  # TKGQuery["relation_id"]
+    ) -> pd.DataFrame:
         # Retrieve temporal rules that are relevant to the query
         df_temporal_rules_queryset = self.df_temporal_rules.query(
-            f"relation_id_head == {query.relation_id} and temporal_delta <= {self.w}"
+            f"relation_id_head == {query_relation_id} and temporal_delta <= {self.w}"
         ).sort_values(by="confidence", ascending=False)
 
         # Get the most confident rule for each relation pair, per temporal_delta
@@ -187,21 +199,6 @@ class GenTKGZeroShotFactsRetriever(IFactsRetriever):
         ].apply(lambda x: x[0])
         return df_temporal_rules
 
-    def _create_temporal_logic_rules(
-        self, cache_path: str | None
-    ) -> List[TemporalLogicRule]:
-        try:
-            if cache_path is not None:
-                return self._read_from_cache(cache_path)
-        except FileNotFoundError:
-            pass
-
-        # If not, learn the rules
-        rule_learner = TemporalLogicRuleLearner()
-        temporal_logic_rules = rule_learner.run(self.training_data)
-        self._cache_temporal_rules(temporal_logic_rules, cache_path)
-        return temporal_logic_rules
-
     def _serialize_facts(self, df: pd.DataFrame) -> List[TKGFact]:
         return [
             TKGFact(
@@ -213,23 +210,3 @@ class GenTKGZeroShotFactsRetriever(IFactsRetriever):
             )
             for _, row in df.iterrows()
         ]
-
-    def _cache_temporal_rules(
-        self, temporal_rules: List[TemporalLogicRule], cache_path: str
-    ):
-        df_temporal_rules = pd.DataFrame([tr.model_dump() for tr in temporal_rules])
-        df_temporal_rules.to_json(cache_path, index=False)
-        print(f"Temporal rules cached to {cache_path}")
-
-    def _read_from_cache(self, cache_path: str):
-        df_temporal_rules = pd.read_json(cache_path)
-        temporal_rules = [
-            TemporalLogicRule(
-                relation_id_head=row["relation_id_head"],
-                relation_id_body=row["relation_id_body"],
-                temporal_delta=row["temporal_delta"],
-                confidence=row["confidence"],
-            )
-            for _, row in df_temporal_rules.iterrows()
-        ]
-        return temporal_rules

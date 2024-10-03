@@ -1,4 +1,4 @@
-from project.src.GenTKG.learners import TemporalLogicRuleLearner
+from project.src.GenTKG.learners.interface import ILearner
 from project.src.GenTKG.retrievers.interface import IFactsRetriever
 from typing import List
 
@@ -24,18 +24,15 @@ class GenTKGFactsRetriever(IFactsRetriever):
         self,
         w: int,
         N: int,
-        training_data: pd.DataFrame,
         retrieval_data: pd.DataFrame,
-        cache_path: str | None = None,
+        learner: ILearner,
     ) -> None:
         self.w = w  # Time window length, [h]
         self.N = N  # Max number of facts to retrieve
-        self.training_data = training_data  # Columns as List[QuadrupleDecoded] which the temporal rules will be learned from
         self.retrieval_data = retrieval_data  # Columns as List[QuadrupleDecoded] which the facts will be retrieved from
+        self.learner = learner  # Learner to learn and retreive the temporal logic rules
 
-        self.temporal_logic_rules: List[TemporalLogicRule] = (
-            self._create_temporal_logic_rules(cache_path=cache_path)
-        )
+        self.temporal_logic_rules = self.learner.get_rules()
         self.df_temporal_rules = self._temporal_rules_to_df(self.temporal_logic_rules)
 
     def retrieve_facts(self, query: TKGQuery, verbose: bool = False) -> List[TKGFact]:
@@ -143,21 +140,6 @@ class GenTKGFactsRetriever(IFactsRetriever):
         ].apply(lambda x: x[0])
         return df_temporal_rules
 
-    def _create_temporal_logic_rules(
-        self, cache_path: str | None
-    ) -> List[TemporalLogicRule]:
-        try:
-            if cache_path is not None:
-                return self._read_from_cache(cache_path)
-        except FileNotFoundError:
-            pass
-
-        # If not, learn the rules
-        rule_learner = TemporalLogicRuleLearner()
-        temporal_logic_rules = rule_learner.run(self.training_data)
-        self._cache_temporal_rules(temporal_logic_rules, cache_path)
-        return temporal_logic_rules
-
     def _serialize_facts(self, df: pd.DataFrame) -> List[TKGFact]:
         return [
             TKGFact(
@@ -176,16 +158,3 @@ class GenTKGFactsRetriever(IFactsRetriever):
         df_temporal_rules = pd.DataFrame([tr.model_dump() for tr in temporal_rules])
         df_temporal_rules.to_json(cache_path, index=False)
         print(f"Temporal rules cached to {cache_path}")
-
-    def _read_from_cache(self, cache_path: str):
-        df_temporal_rules = pd.read_json(cache_path)
-        temporal_rules = [
-            TemporalLogicRule(
-                relation_id_head=row["relation_id_head"],
-                relation_id_body=row["relation_id_body"],
-                temporal_delta=row["temporal_delta"],
-                confidence=row["confidence"],
-            )
-            for _, row in df_temporal_rules.iterrows()
-        ]
-        return temporal_rules
