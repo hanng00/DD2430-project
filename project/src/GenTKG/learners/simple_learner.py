@@ -6,10 +6,10 @@ from typing import List
 
 class SimpleLearner(ILearner):
     def __init__(self, training_data: pd.DataFrame, cache_path: str | None = None):
-        self.training_data = training_data  # List[Quadruple]
+        self.training_data: List[Quadruple] = training_data
         self.cache_path = cache_path
 
-        self.temporal_rules = []
+        self.temporal_rules: List[TemporalLogicRule] = []
 
     def learn(self):
         # Check cache
@@ -34,6 +34,21 @@ class SimpleLearner(ILearner):
             self.learn()
 
         return self.temporal_rules
+
+    def remove_rules(self, relation_ids: List[int]):
+        """
+        Remove rules that contain the given relation_ids.
+        """
+        do_keep = lambda rule: (
+            rule.relation_id_head[0] not in relation_ids
+            and rule.relation_id_body[0] not in relation_ids
+        )
+
+        n_rules_before = len(self.temporal_rules)
+        self.temporal_rules = [rule for rule in self.temporal_rules if do_keep(rule)]
+        n_rules_after = len(self.temporal_rules)
+        
+        print(f"Removed {n_rules_before - n_rules_after} rules.")
 
     def _extract_temporal_random_walks(
         self, df_quadruples: pd.DataFrame  # List[Quadruple]

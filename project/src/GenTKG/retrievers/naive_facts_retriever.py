@@ -24,7 +24,7 @@ class NaiveFactsRetriever(IFactsRetriever):
         self.w = w  # Time window length, [h]
         self.N = N  # Number of facts to retrieve at most
 
-    def retrieve_facts(self, query: TKGQuery) -> List[TKGFact]:
+    def retrieve_facts(self, query: TKGQuery, verbose: bool = False) -> List[TKGFact]:
         """Retrieve the facts based on the query"""
         # Query the training data for the given subject and relation
         subject_id = query.subject_id
@@ -50,5 +50,8 @@ class NaiveFactsRetriever(IFactsRetriever):
             )
             for _, row in df_N_recent_events.iterrows()
         ]
+
+        if verbose:
+            print(f"Retrieved {len(facts)} facts.")
 
         return facts
